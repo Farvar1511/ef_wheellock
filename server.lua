@@ -1,47 +1,40 @@
 ------------------------------------------------------------
--- server.lua
+-- server.lua – Revised Best Practice Following Effective FiveM Lua Guidelines
 ------------------------------------------------------------
 local QBox = exports['qb-core']:GetCoreObject()
 local json = json or require("json")
 
--- Table to track clamped state per vehicle.
--- For each vehicleNetId, this table will contain keys corresponding to tire bone names that are clamped.
+-- Local data: Track clamp state per vehicle (by tire bone)
 local clampedVehicles = {}
 
--- Check if the player has a wheel clamp in their inventory.
+-- Check if player has a wheel clamp in inventory.
 QBox.Functions.CreateCallback("wheelclamp:server:CheckInventory", function(source, cb, itemName)
     local Player = QBox.Functions.GetPlayer(source)
-    if Player then
-        local item = Player.Functions.GetItemByName(itemName)
-        cb(item ~= nil)
-    else
-        cb(false)
-    end
+    cb(Player and (Player.Functions.GetItemByName(itemName) ~= nil) or false)
 end)
 
--- Apply Clamp: Remove a clamp item and record clamp state for a specific tire (bone)
 RegisterNetEvent("wheelclamp:server:ApplyClamp")
 AddEventHandler("wheelclamp:server:ApplyClamp", function(vehicleNetId, bone)
     local src = source
-    print("[WheelClamp DEBUG] (Server) Received clamp request for NetID:", vehicleNetId, "bone:", bone, "from source:", src)
+    print(string.format("[Server] Received clamp request for NetID: %s, bone: %s from source: %s", vehicleNetId, bone, src))
     local Player = QBox.Functions.GetPlayer(src)
-    if not Player then 
-        print("[WheelClamp DEBUG] (Server) ERROR: Player not found for source:", src)
-        return 
+    if not Player then
+        print(string.format("[Server] ERROR: Player not found for source: %s", src))
+        return
     end
 
     clampedVehicles[vehicleNetId] = clampedVehicles[vehicleNetId] or {}
     if clampedVehicles[vehicleNetId][bone] then
         QBox.Functions.Notify(src, "This tire is already clamped.", "error", 5000)
-        print("[WheelClamp DEBUG] (Server) Tire already clamped for vehicle NetID:", vehicleNetId, "bone:", bone)
+        print(string.format("[Server] Tire already clamped for vehicle NetID: %s, bone: %s", vehicleNetId, bone))
         return
     end
 
     local removalSuccess = Player.Functions.RemoveItem("wheel_clamp", 1)
-    print("[WheelClamp DEBUG] (Server) RemoveItem result for source", src, ":", removalSuccess)
+    print(string.format("[Server] RemoveItem result for source %s: %s", src, tostring(removalSuccess)))
     if not removalSuccess then
         QBox.Functions.Notify(src, "Failed to remove clamp item.", "error", 5000)
-        print("[WheelClamp DEBUG] (Server) ERROR: Could not remove clamp item for source:", src)
+        print(string.format("[Server] ERROR: Could not remove clamp item for source: %s", src))
         return
     end
 
@@ -49,45 +42,43 @@ AddEventHandler("wheelclamp:server:ApplyClamp", function(vehicleNetId, bone)
     local bagName = "entity:" .. vehicleNetId
     local stateData = { applied = true, bone = bone }
     SetStateBagValue(bagName, "efWheelClamp", json.encode(stateData), true)
-    print("[WheelClamp DEBUG] (Server) Clamp applied for vehicle NetID:", vehicleNetId, "bone:", bone)
+    print(string.format("[Server] Clamp applied for vehicle NetID: %s, bone: %s", vehicleNetId, bone))
     TriggerClientEvent("wheelclamp:client:ForceApplyClamp", -1, vehicleNetId, true, bone)
 end)
 
--- Remove Clamp: Add back a clamp item and remove clamp state for a specific tire (bone)
 RegisterNetEvent("wheelclamp:server:RemoveClamp")
 AddEventHandler("wheelclamp:server:RemoveClamp", function(vehicleNetId, bone)
     local src = source
-    print("[WheelClamp DEBUG] (Server) Received clamp removal request for NetID:", vehicleNetId, "bone:", bone, "from source:", src)
+    print(string.format("[Server] Received clamp removal request for NetID: %s, bone: %s from source: %s", vehicleNetId, bone, src))
     local Player = QBox.Functions.GetPlayer(src)
     if not Player then return end
 
     if not (clampedVehicles[vehicleNetId] and clampedVehicles[vehicleNetId][bone]) then
         QBox.Functions.Notify(src, "This tire is not clamped.", "error", 5000)
-        print("[WheelClamp DEBUG] (Server) Tire not clamped for vehicle NetID:", vehicleNetId, "bone:", bone)
+        print(string.format("[Server] Tire not clamped for vehicle NetID: %s, bone: %s", vehicleNetId, bone))
         return
     end
 
     local addSuccess = Player.Functions.AddItem("wheel_clamp", 1)
-    print("[WheelClamp DEBUG] (Server) AddItem result for source", src, ":", addSuccess)
+    print(string.format("[Server] AddItem result for source %s: %s", src, tostring(addSuccess)))
     if not addSuccess then
         QBox.Functions.Notify(src, "Failed to add clamp item to inventory.", "error", 5000)
-        print("[WheelClamp DEBUG] (Server) ERROR: Could not add clamp item for source:", src)
+        print(string.format("[Server] ERROR: Could not add clamp item for source: %s", src))
         return
     end
 
     clampedVehicles[vehicleNetId][bone] = nil
-    if next(clampedVehicles[vehicleNetId]) == nil then
+    if not next(clampedVehicles[vehicleNetId]) then
         clampedVehicles[vehicleNetId] = nil
     end
 
     local bagName = "entity:" .. vehicleNetId
     local stateData = { applied = false, bone = bone }
     SetStateBagValue(bagName, "efWheelClamp", json.encode(stateData), true)
-    print("[WheelClamp DEBUG] (Server) Clamp removed for vehicle NetID:", vehicleNetId, "bone:", bone)
+    print(string.format("[Server] Clamp removed for vehicle NetID: %s, bone: %s", vehicleNetId, bone))
     TriggerClientEvent("wheelclamp:client:ForceApplyClamp", -1, vehicleNetId, false, bone)
 end)
 
--- Sync Clamp: Update clamp state manually for a specific tire.
 RegisterNetEvent("wheelclamp:server:SyncClamp")
 AddEventHandler("wheelclamp:server:SyncClamp", function(vehicleNetId, clampApplied, bone)
     clampedVehicles[vehicleNetId] = clampedVehicles[vehicleNetId] or {}
@@ -95,7 +86,7 @@ AddEventHandler("wheelclamp:server:SyncClamp", function(vehicleNetId, clampAppli
         clampedVehicles[vehicleNetId][bone] = true
     else
         clampedVehicles[vehicleNetId][bone] = nil
-        if next(clampedVehicles[vehicleNetId]) == nil then
+        if not next(clampedVehicles[vehicleNetId]) then
             clampedVehicles[vehicleNetId] = nil
         end
     end
@@ -104,7 +95,6 @@ AddEventHandler("wheelclamp:server:SyncClamp", function(vehicleNetId, clampAppli
     SetStateBagValue(bagName, "efWheelClamp", json.encode(stateData), true)
 end)
 
--- Restore Clamp: When a vehicle streams in, reapply clamp(s) based on the server table.
 RegisterNetEvent("wheelclamp:server:RestoreClamp")
 AddEventHandler("wheelclamp:server:RestoreClamp", function(vehicleNetId)
     local bagName = "entity:" .. vehicleNetId
@@ -113,20 +103,19 @@ AddEventHandler("wheelclamp:server:RestoreClamp", function(vehicleNetId)
             local stateData = { applied = true, bone = bone }
             SetStateBagValue(bagName, "efWheelClamp", json.encode(stateData), true)
             TriggerClientEvent("wheelclamp:client:ForceApplyClamp", -1, vehicleNetId, true, bone)
-            print("[WheelClamp DEBUG] (Server) Restoring clamp for vehicle NetID:", vehicleNetId, "bone:", bone)
+            print(string.format("[Server] Restoring clamp for vehicle NetID: %s, bone: %s", vehicleNetId, bone))
         end
     else
-        print("[WheelClamp DEBUG] (Server) No clamp state to restore for vehicle NetID:", vehicleNetId)
+        print(string.format("[Server] No clamp state to restore for vehicle NetID: %s", vehicleNetId))
     end
 end)
 
--- Check Clamp: Report the clamp status (including bone) to the client.
 RegisterNetEvent("wheelclamp:server:CheckClamp")
 AddEventHandler("wheelclamp:server:CheckClamp", function(vehicleNetId)
     local src = source
     local bagName = "entity:" .. vehicleNetId
     local state = GetStateBagValue(bagName, "efWheelClamp")
-    print("[WheelClamp DEBUG] (Server) CheckClamp: For vehicle", vehicleNetId, "state bag value:", state)
+    print(string.format("[Server] CheckClamp: For vehicle %s, state bag value: %s", vehicleNetId, tostring(state)))
     local status = "NOT clamped"
     if state and type(state) == "string" and state ~= "" then
         local success, data = pcall(json.decode, state)
@@ -134,6 +123,6 @@ AddEventHandler("wheelclamp:server:CheckClamp", function(vehicleNetId)
             status = "CLAMPED on " .. data.bone
         end
     end
-    print("[WheelClamp DEBUG] (Server) CheckClamp: Vehicle", vehicleNetId, "is", status)
+    print(string.format("[Server] CheckClamp: Vehicle %s is %s", vehicleNetId, status))
     TriggerClientEvent("chat:addMessage", src, { args = { "Server Clamp Status", "Vehicle " .. vehicleNetId .. " is " .. status .. "." } })
 end)
