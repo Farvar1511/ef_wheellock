@@ -1,31 +1,35 @@
 -- server.lua
--- Assumes config.lua is loaded via fxmanifest.lua
+-- This script handles server-side logic for the wheel clamp resource.
+-- It manages player data, validates job and inventory requirements,
+-- updates clamp state, and synchronizes clamp information with clients.
 
-lib.print.debug("[Server] Starting server.lua for ef_wheellock")
+print("[Server] Starting server.lua for ef_wheellock")
 
 --------------------------------------------------------------------------------
--- Helper: Get Player Data (no caching)
+-- Helper: Get Player Data
+-- Retrieves player data using the framework export defined in Config.
 --------------------------------------------------------------------------------
 local function GetPlayerData(src)
     return exports[Config.FrameworkExport]:GetPlayer(src)
 end
 
 --------------------------------------------------------------------------------
--- Callback: Return Full Player Data (for debugging/grade checks)
+-- Callback: Return Full Player Data for Debugging
+-- Returns player data so that you can verify job and grade.
 --------------------------------------------------------------------------------
 lib.callback.register("wheelclamp:server:getPlayerData", function(source)
     local data = GetPlayerData(source)
     if data then
-        print(string.format("[Server Debug] getPlayerData for %s: job=%s, grade=%s", 
-            source, tostring(data.PlayerData.job.name), tostring(data.PlayerData.job.grade)))
+        print(string.format("[Server Debug] getPlayerData for %s: job=%s, grade=%s", source, tostring(data.PlayerData.job.name), tostring(data.PlayerData.job.grade)))
     else
-        print("[Server Debug] getPlayerData: No data for source " .. source)
+        print(string.format("[Server Debug] getPlayerData: No data for source %s", source))
     end
     return data
 end)
 
 --------------------------------------------------------------------------------
--- Callback: Return Player's Job (lowercase) for quick checks
+-- Callback: Return Player's Job (Lowercase)
+-- Quickly returns just the player's job name for authorization.
 --------------------------------------------------------------------------------
 lib.callback.register("wheelclamp:server:getPlayerJob", function(source)
     local playerData = GetPlayerData(source)
@@ -39,7 +43,8 @@ lib.callback.register("wheelclamp:server:getPlayerJob", function(source)
 end)
 
 --------------------------------------------------------------------------------
--- Callback: Check if player has the clamp item
+-- Callback: Check if Player Has the Clamp Item
+-- Uses ox_inventory to verify that the player has the item defined in Config.
 --------------------------------------------------------------------------------
 lib.callback.register("wheelclamp:server:hasClampItem", function(source)
     local item = exports.ox_inventory:GetItem(source, Config.ItemName, nil, true)
@@ -49,12 +54,14 @@ end)
 
 --------------------------------------------------------------------------------
 -- Clamp State Storage
+-- This table stores clamp state for vehicles. It is synchronized with clients.
 --------------------------------------------------------------------------------
 local clampedVehicles = {}
 
 --------------------------------------------------------------------------------
 -- Callback: Apply Clamp
--- Only allow if player's job meets Config.ApplyClampAllowedJobs and they have the clamp item.
+-- Validates player authorization, removes the clamp item from inventory,
+-- updates clamp state, and notifies clients.
 --------------------------------------------------------------------------------
 lib.callback.register("wheelclamp:server:applyClamp", function(source, vehicleNetId, bone)
     local src = source
@@ -76,19 +83,20 @@ lib.callback.register("wheelclamp:server:applyClamp", function(source, vehicleNe
 
     local hasItem = exports.ox_inventory:GetItem(src, Config.ItemName, nil, true) ~= nil
     if not hasItem then
-        print("[WheelClamp Debug] Player " .. src .. " does not have the clamp item!")
+        print(string.format("[WheelClamp Debug] Player %s does not have the clamp item!", src))
         return false, "Missing clamp item"
     end
 
     vehicleNetId = tonumber(vehicleNetId)
     if clampedVehicles[vehicleNetId] and clampedVehicles[vehicleNetId].clamp then
-        print("[WheelClamp Debug] Vehicle " .. vehicleNetId .. " already clamped")
+        print(string.format("[WheelClamp Debug] Vehicle %d already clamped", vehicleNetId))
         return false, "Vehicle already clamped"
     end
 
+    -- Remove the clamp item from the player's inventory.
     local removalSuccess = playerData.Functions.RemoveItem(Config.ItemName, 1)
     if not removalSuccess then
-        print("[WheelClamp Debug] Failed to remove clamp item for player " .. src)
+        print(string.format("[WheelClamp Debug] Failed to remove clamp item for player %s", src))
         return false, "Failed to remove clamp item"
     end
 
@@ -103,7 +111,8 @@ end)
 
 --------------------------------------------------------------------------------
 -- Callback: Remove Clamp
--- Only allow removal if player's job meets Config.RemoveClampAllowedJobs.
+-- Validates authorization, returns the clamp item to the player,
+-- clears the clamp state, and notifies clients.
 --------------------------------------------------------------------------------
 lib.callback.register("wheelclamp:server:removeClamp", function(source, vehicleNetId, bone)
     local src = source
@@ -123,13 +132,13 @@ lib.callback.register("wheelclamp:server:removeClamp", function(source, vehicleN
 
     vehicleNetId = tonumber(vehicleNetId)
     if not (clampedVehicles[vehicleNetId] and clampedVehicles[vehicleNetId].clamp) then
-        print("[WheelClamp Debug] Vehicle " .. vehicleNetId .. " is not clamped")
+        print(string.format("[WheelClamp Debug] Vehicle %d is not clamped", vehicleNetId))
         return false, "Vehicle is not clamped"
     end
 
     local addSuccess = playerData.Functions.AddItem(Config.ItemName, 1)
     if not addSuccess then
-        print("[WheelClamp Debug] Failed to add clamp item back to player " .. src)
+        print(string.format("[WheelClamp Debug] Failed to add clamp item back to player %s", src))
         return false, "Failed to add clamp item back to player"
     end
 
@@ -143,7 +152,8 @@ lib.callback.register("wheelclamp:server:removeClamp", function(source, vehicleN
 end)
 
 --------------------------------------------------------------------------------
--- Event: Restore Clamp State (for syncing when vehicles stream in)
+-- Event: Restore Clamp State
+-- When a vehicle streams in, restore its clamp state from the stored state.
 --------------------------------------------------------------------------------
 RegisterNetEvent("wheelclamp:server:RestoreClamp", function(vehicleNetId)
     vehicleNetId = tonumber(vehicleNetId)
@@ -161,4 +171,4 @@ RegisterNetEvent("wheelclamp:server:RestoreClamp", function(vehicleNetId)
     end
 end)
 
-lib.print.debug("[Server] Finished loading server.lua")
+print("[Server] Finished loading server.lua")
