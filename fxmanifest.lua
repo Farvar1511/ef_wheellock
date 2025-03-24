@@ -8,6 +8,8 @@ version '1.0.0'
 lua54 'yes'
 
 shared_scripts {
+    'config.lua',       -- Load config first
+    'clampconfig.lua',  -- Then load clamp offsets
     '@ox_lib/init.lua',
     '@qbx_core/modules/lib.lua'
 }
