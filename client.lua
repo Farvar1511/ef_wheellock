@@ -1,97 +1,18 @@
--- client.lua
--- This script handles client-side functionality for the wheel clamp resource.
--- It requires that config.lua and clampconfig.lua are loaded via fxmanifest.lua.
+local config = require('config')
+local TIRE_BONES = { "wheel_lf", "wheel_rf", "wheel_lr", "wheel_rr" }
+local wheelClamps = {}
 
--- Global definitions:
-TIRE_BONES = { "wheel_lf", "wheel_rf", "wheel_lr", "wheel_rr" }  -- Tire bones for targeting
-ITEM_NAME = Config.ItemName or "wheel_clamp"                        -- Clamp item name (from config)
-clientClampedVehicles = clientClampedVehicles or {}                -- Tracks vehicles with clamps (by netID)
-wheelClamps = wheelClamps or {}                                      -- Stores clamp prop objects attached to vehicles
+local APPROACH_OFFSETS = {
+    wheel_lf = vector3(-0.7, 0.1, 0.6),
+    wheel_rf = vector3(0.8, 0.1, 0.6),
+    wheel_lr = vector3(-0.7, 0.1, 0.6),
+    wheel_rr = vector3(0.8, 0.1, 0.6)
+}
 
--- Debug function: Prints debug messages if Config.Debug is true.
-local function dbg(msg)
-    if Config.Debug then
-        print(string.format("[WHEELCLAMP DEBUG] %s", tostring(msg)))
-    end
-end
+local DEFAULT_OFFSET = vector3(-0.7, 0.1, 0.6)
 
---------------------------------------------------------------------------------
--- Player Data Functions
---------------------------------------------------------------------------------
--- Retrieves player data using the qbx_core export.
-local function getPlayerData()
-    return exports['qbx_core']:GetPlayerData()
-end
-
--- Retrieves the player's job name (lowercase) and grade.
-local function getPlayerJob()
-    local data = getPlayerData()
-    if data and data.job and data.job.name then
-        return data.job.name:lower(), tonumber(data.job.grade) or 0
-    end
-    return "", 0
-end
-
---------------------------------------------------------------------------------
--- Inventory Check
---------------------------------------------------------------------------------
--- Checks whether the player has the clamp item using ox_inventory.
-local function hasClampItem()
-    local inventory = exports.ox_inventory:GetPlayerItems() or {}
-    for _, item in pairs(inventory) do
-        dbg(string.format("Inventory item: name=%s, count=%s", tostring(item.name), tostring(item.count)))
-        if item.name == ITEM_NAME then
-            return true
-        end
-    end
-    return false
-end
-
---------------------------------------------------------------------------------
--- Job Permission Checks
---------------------------------------------------------------------------------
--- Checks if the player meets the requirements for applying or removing clamps.
-local function canApply()
-    local job, grade = getPlayerJob()
-    dbg(string.format("canApply() -> job: %s, grade: %d, hasClampItem: %s", job, grade, tostring(hasClampItem())))
-    local required = Config.ApplyClampAllowedJobs[job]
-    return required and (grade >= required) and hasClampItem()
-end
-
-local function canRemove()
-    local job, grade = getPlayerJob()
-    local required = Config.RemoveClampAllowedJobs[job]
-    return required and (grade >= required)
-end
-
---------------------------------------------------------------------------------
--- Clamp Offset Configurations & Timing
---------------------------------------------------------------------------------
--- These are loaded from clampconfig.lua.
-local APPLY_DURATION = 8000  -- Duration (ms) for the mechanic animation/progress bar
-
---------------------------------------------------------------------------------
--- Helper Functions: Positioning & State Bag
---------------------------------------------------------------------------------
--- Constructs a state bag name using the entity's network ID.
-local function GetStateBagName(entity)
-    local netId = NetworkGetNetworkIdFromEntity(entity)
-    return "entity:" .. netId
-end
-
--- Returns the server network ID for a vehicle.
-local function getServerNetId(vehicle)
-    local bagName = GetStateBagName(vehicle)
-    if bagName then
-        local netIdStr = bagName:match("entity:(%d+)")
-        if netIdStr then return tonumber(netIdStr) end
-    end
-    return NetworkGetNetworkIdFromEntity(vehicle)
-end
-
--- Chooses the clamp model name based on the vehicle class.
-local function GetVehicleClampModel(vehicle)
-    local vehClass = tonumber(GetVehicleClass(vehicle))
+local function getVehicleClampModel(vehicle)
+    local vehClass = GetVehicleClass(vehicle)
     if vehClass == 8 then
         return "baspel_wheelclamp_motorcycle"
     elseif vehClass == 2 or vehClass == 9 then
@@ -101,9 +22,8 @@ local function GetVehicleClampModel(vehicle)
     end
 end
 
--- Returns the name of the closest tire bone to the player's position.
 local function getClosestTireBoneByPlayer(vehicle)
-    local pedPos = GetEntityCoords(PlayerPedId())
+    local pedPos = GetEntityCoords(cache.ped)
     local closest, dist = nil, math.huge
     for _, bone in ipairs(TIRE_BONES) do
         local idx = GetEntityBoneIndexByName(vehicle, bone)
@@ -118,20 +38,16 @@ local function getClosestTireBoneByPlayer(vehicle)
     return closest
 end
 
--- Returns the bone that currently has a clamp attached.
-local function getClosestClampedTire(vehicle)
-    local netId = getServerNetId(vehicle)
-    return clientClampedVehicles[tostring(netId)]
-end
-
--- Computes the approach position for the specified tire bone.
 local function getApproachPosForTire(vehicle, bone)
     local idx = GetEntityBoneIndexByName(vehicle, bone)
+
     if not idx or idx == -1 then return nil end
+
     local tirePos = GetWorldPositionOfEntityBone(vehicle, idx)
     local offset = APPROACH_OFFSETS[bone] or DEFAULT_OFFSET
     local mag = #(offset)
     local norm = (mag > 0) and (offset / mag) or vector3(0, 0, 0)
+
     local function rotate(off)
         local rot = GetEntityRotation(vehicle, 2) or vector3(0, 0, 0)
         local rad = math.rad(rot.z or 0)
@@ -139,70 +55,72 @@ local function getApproachPosForTire(vehicle, bone)
         local ry = off.x * math.sin(rad) + off.y * math.cos(rad)
         return vector3(rx, ry, off.z)
     end
+
     return tirePos + rotate(norm), tirePos
 end
 
--- Waits until the player is within a certain distance of a target coordinate.
-local function waitUntilClose(target, maxTime, cb)
-    local startTime = GetGameTimer()
-    while GetGameTimer() - startTime < maxTime do
-        if #(GetEntityCoords(PlayerPedId()) - target) < 0.5 then
-            return cb(true)
-        end
-        Wait(100)
-    end
-    cb(false)
-end
-
--- Rotates the player smoothly to face a coordinate.
 local function smoothTurnToCoord(ped, x, y, z, duration)
     TaskTurnPedToFaceCoord(ped, x, y, z, duration)
     Wait(duration)
 end
 
---------------------------------------------------------------------------------
--- walkToOffsetAndAnimate
--- Forces the player to walk to the target offset, turns them to face the tire,
--- then concurrently displays a progress bar (with label) while playing the mechanic animation.
--- Both the progress bar and the animation run for the same duration.
---------------------------------------------------------------------------------
-local function walkToOffsetAndAnimate(vehicle, duration, cb, bone, animLabel)
+---Walks to a tire and applies an animation.
+---@param vehicle number
+---@param duration number
+---@param bone string
+---@param animLabel string
+---@return boolean
+local function walkToOffsetAndAnimate(vehicle, duration, bone, animLabel)
     if not bone then
-        TriggerEvent("chat:addMessage", { args = { "Error", "No tire specified." } })
-        return cb(false)
+        lib.notify({
+            title = 'No tire specified.',
+            type = 'error'
+        })
+        return false
     end
 
     local target, tirePos = getApproachPosForTire(vehicle, bone)
     if not (target and tirePos) then
-        TriggerEvent("chat:addMessage", { args = { "Error", "Failed to compute approach offset." } })
-        return cb(false)
+        lib.notify({
+            title = 'Failed to compute approach offset.',
+            type = 'error'
+        })
+        return false
     end
 
-    -- Force the player to walk to the target offset (no progress bar here).
-    TaskFollowNavMeshToCoord(PlayerPedId(), target.x, target.y, target.z, 0.4, 10000, 1.0, false, 0)
+    lib.print.debug(('Walking to approach tire %s'):format(bone))
+
+    TaskGoToCoordAnyMeans(cache.ped, target.x, target.y, target.z, 1.0)
+
     local arrived = false
     local startTime = GetGameTimer()
     while GetGameTimer() - startTime < 10000 do
-        if #(GetEntityCoords(PlayerPedId()) - target) < 0.5 then
+        if #(GetEntityCoords(cache.ped) - target) < 0.75 then
             arrived = true
             break
         end
         DisableAllControlActions(0)
-        Wait(100)
+        Wait(0)
     end
+
+    lib.print.debug(('Arrived at approach tire %s'):format(bone))
 
     if not arrived then
-        TriggerEvent("chat:addMessage", { args = { "Error", "Timed out or path blocked." } })
-        return cb(false)
+        lib.notify({
+            title = 'Timed out or path blocked.',
+            type = 'error'
+        })
+        return false
     end
 
-    -- Turn the player to face the tire.
-    smoothTurnToCoord(PlayerPedId(), tirePos.x, tirePos.y, tirePos.z, 1000)
+    lib.print.debug(('Smooth turn to tire %s'):format(bone))
+
+    smoothTurnToCoord(cache.ped, tirePos.x, tirePos.y, tirePos.z, 1000)
+
     Wait(500)
 
-    -- Start the progress bar concurrently in a new thread so it runs alongside the animation.
-    Citizen.CreateThread(function()
-        exports.ox_lib:progressBar({
+    CreateThread(function()
+        lib.progressBar({
             duration = duration,
             label = animLabel,
             disable = { move = true, combat = true },
@@ -211,52 +129,93 @@ local function walkToOffsetAndAnimate(vehicle, duration, cb, bone, animLabel)
         })
     end)
 
-    -- Start the mechanic animation.
     ExecuteCommand("e mechanic4")
     Wait(duration)
     ExecuteCommand("e c")
-    cb(true)
+
+    return true
 end
 
---------------------------------------------------------------------------------
--- Clamp Prop Attachment Functions
---------------------------------------------------------------------------------
--- Attaches a clamp prop to the specified tire bone of a vehicle.
--- If a clamp already exists for this bone, it will be reattached.
-local function attachClamp(vehicle, bone)
-    if not bone or not DoesEntityExist(vehicle) then return end
-    local netId = getServerNetId(vehicle)
+---Detaches a clamp from a vehicle.
+---@param vehicle number
+---@param bone string
+local function detachClamp(vehicle, bone)
+    local netId = NetworkGetNetworkIdFromEntity(vehicle)
     local key = tostring(netId) .. bone
-    local idx = GetEntityBoneIndexByName(vehicle, bone)
-    if not idx or idx == -1 then 
-        TriggerEvent("chat:addMessage", { args = { "Error", string.format("Invalid bone '%s' for vehicle netID: %s", bone, tostring(netId)) } })
-        return 
+
+    if wheelClamps[key] then
+        lib.print.debug(('Removing clamp from vehicle %s at bone %s'):format(tostring(netId), bone))
+        SetEntityAsMissionEntity(wheelClamps[key], true, true)
+        DeleteEntity(wheelClamps[key])
+        wheelClamps[key] = nil
     end
 
-    local vehClass = tonumber(GetVehicleClass(vehicle))
-    local modelName = (vehClass == 8 and "baspel_wheelclamp_motorcycle")
-                      or ((vehClass == 2 or vehClass == 9) and "baspel_wheelclamp_suv")
-                      or "baspel_wheelclamp_normal"
-    local modelHash = joaat(modelName)
-    if not IsModelInCdimage(modelHash) then
-        TriggerEvent("chat:addMessage", { args = { "Error", string.format("Clamp model '%s' does not exist.", modelName) } })
+    SetVehicleUndriveable(vehicle, false)
+end
+
+---Attaches a clamp to a vehicle.
+---@param vehicle number
+---@param bone string
+local function attachClamp(vehicle, bone)
+    if not bone or not DoesEntityExist(vehicle) then
+        lib.print.error("Attempted to attach clamp to invalid vehicle or bone.")
         return
     end
-    RequestModel(modelHash)
+
+    lib.print.debug(('Attaching clamp to vehicle %s at bone %s'):format(tostring(NetworkGetNetworkIdFromEntity(vehicle)), bone))
+
+    local netId = NetworkGetNetworkIdFromEntity(vehicle)
+    local key = tostring(netId) .. bone
+    local idx = GetEntityBoneIndexByName(vehicle, bone)
+
+    if not idx or idx == -1 then
+        lib.notify({
+            title = string.format("Invalid bone '%s' for vehicle netID: %s", bone, tostring(netId)),
+            type = 'error'
+        })
+        return
+    end
+
+    lib.print.debug(('Getting clamp model for vehicle %s'):format(tostring(netId)))
+
+    local modelName = getVehicleClampModel(vehicle)
+    local modelHash = joaat(modelName)
+    if not IsModelValid(modelHash) or not IsModelInCdimage(modelHash) then
+        lib.notify({
+            title = string.format("Clamp model '%s' does not exist.", modelName),
+            type = 'error'
+        })
+        return
+    end
+
+    lib.print.debug(('Loading clamp model %s'):format(modelName))
+
     local start = GetGameTimer()
     while not HasModelLoaded(modelHash) do
-        Wait(10)
+        pcall(function()
+            lib.requestModel(modelHash)
+        end)
+
+        Wait(0)
+
         if GetGameTimer() - start > 5000 then
-            TriggerEvent("chat:addMessage", { args = { "Error", string.format("Clamp model '%s' failed to load.", modelName) } })
+            lib.notify({
+                title = string.format("Clamp model '%s' failed to load.", modelName),
+                type = 'error'
+            })
             return
         end
     end
+
+    lib.print.debug(('Getting clamp position for vehicle %s at bone %s'):format(tostring(netId), bone))
+
     local pos = GetWorldPositionOfEntityBone(vehicle, idx)
-    
+
+    local wheelConfig = config.clampConfig[modelName] or {}
+    local offsets = wheelConfig[bone] or { pos = vector3(0, 0, 0), rot = vector3(0, 0, 0) }
+
     -- If a clamp already exists, reattach it.
     if wheelClamps[key] then
-        local config = CLAMP_CONFIG[modelName] or {}
-        local offsets = config[bone] or { pos = vector3(0, 0, 0), rot = vector3(0, 0, 0) }
         AttachEntityToEntity(wheelClamps[key], vehicle, idx,
             offsets.pos.x, offsets.pos.y, offsets.pos.z,
             offsets.rot.x, offsets.rot.y, offsets.rot.z,
@@ -265,217 +224,219 @@ local function attachClamp(vehicle, bone)
     end
 
     -- Otherwise, create a new clamp prop.
-    local clampObj = CreateObject(modelHash, pos.x, pos.y, pos.z, true, true, false)
-    if not clampObj or clampObj == 0 then
-        TriggerEvent("chat:addMessage", { args = { "Error", "Failed to create clamp prop." } })
+    local clampObj = CreateObject(modelHash, pos.x, pos.y, pos.z)
+    if not clampObj or clampObj == 0 or not DoesEntityExist(clampObj) then
+        lib.notify({
+            title = 'Failed to create clamp prop.',
+            type = 'error'
+        })
         return
     end
-    local config = CLAMP_CONFIG[modelName] or {}
-    local offsets = config[bone] or { pos = vector3(0, 0, 0), rot = vector3(0, 0, 0) }
+
     AttachEntityToEntity(clampObj, vehicle, idx,
         offsets.pos.x, offsets.pos.y, offsets.pos.z,
         offsets.rot.x, offsets.rot.y, offsets.rot.z,
         false, false, false, false, 1, true)
-    FreezeEntityPosition(clampObj, true)
+
     SetEntityCollision(clampObj, false, false)
+
     wheelClamps[key] = clampObj
-    Wait(100)
+
     SetVehicleUndriveable(vehicle, true)
-    SetVehicleEngineOn(vehicle, false, true, true)
+
+    CreateThread(function()
+        while DoesEntityExist(vehicle) and DoesEntityExist(clampObj) do
+            if cache.vehicle and cache.vehicle == vehicle and cache.seat == -1 then
+                DisableControlAction(0, 71, true)
+                DisableControlAction(0, 72, true)
+            end
+
+            Wait(0)
+        end
+    end)
+
+    CreateThread(function()
+        while true do
+            if not DoesEntityExist(clampObj) then
+                break
+            end
+
+            if not DoesEntityExist(vehicle) then
+                SetEntityAsMissionEntity(wheelClamps[key], true, true)
+                DeleteEntity(clampObj)
+                wheelClamps[key] = nil
+                break
+            end
+
+            Wait(1000)
+        end
+    end)
 end
 
--- Detaches and deletes the clamp prop from the vehicle.
-local function detachClamp(vehicle, bone)
-    if not bone then return end
-    local netId = getServerNetId(vehicle)
-    local key = tostring(netId) .. bone
-    if wheelClamps[key] then
-        DeleteObject(wheelClamps[key])
-        wheelClamps[key] = nil
+---Applies a clamp to a vehicle.
+---@param data number|OxTargetOption
+local function applyClamp(data)
+    local vehicle = data.entity
+    if not DoesEntityExist(vehicle) then
+        lib.notify({
+            title = 'No vehicle nearby!',
+            type = 'error'
+        })
+        return
     end
-    SetVehicleUndriveable(vehicle, false)
-    SetVehicleEngineOn(vehicle, false, true, true)
+
+    if exports.ox_inventory:Search('count', config.itemName) <= 0 then
+        lib.notify({
+            title = 'You do not have a wheel clamp!',
+            type = 'error'
+        })
+        return
+    end
+
+    local bone = getClosestTireBoneByPlayer(vehicle)
+    if not bone then
+        lib.notify({
+            title = 'Could not determine target tire.',
+            type = 'error'
+        })
+        return
+    end
+
+    local success = walkToOffsetAndAnimate(vehicle, config.times.addClamp, bone, "Applying Parking Boot")
+
+    if not success then
+        lib.notify({
+            title = 'Failed to complete animation.',
+            type = 'error'
+        })
+        return
+    end
+
+    local netId = NetworkGetNetworkIdFromEntity(vehicle)
+    local result, err = lib.callback.await('EF-Wheelclamp:Server:ApplyClamp', false, netId, bone)
+
+    if not result then
+        lib.notify({
+            title = ("Clamp application failed: %s"):format(tostring(err)),
+            type = 'error'
+        })
+        return
+    end
+
+    lib.notify({
+        title = 'Clamp applied!',
+        type = 'success'
+    })
 end
 
---------------------------------------------------------------------------------
--- Ox Target Registration
--- Registers two target options:
---   1. "Apply Parking Boot" if no clamp is applied.
---   2. "Remove Parking Boot" if a clamp is applied.
---------------------------------------------------------------------------------
+---Removes a clamp from a vehicle.
+---@param data number|OxTargetOption
+local function removeClamp(data)
+    local vehicle = data.entity
+    if not DoesEntityExist(vehicle) then
+        lib.notify({
+            title = 'No vehicle nearby!',
+            type = 'error'
+        })
+        return
+    end
+
+    local bone = Entity(vehicle).state.wheelclamp
+    if not bone then
+        lib.notify({
+            title = 'No clamped tire found.',
+            type = 'error'
+        })
+        return
+    end
+
+    local success = walkToOffsetAndAnimate(vehicle, config.times.removeClamp, bone, "Removing Parking Boot")
+    if not success then
+        lib.notify({
+            title = 'Failed to complete animation.',
+            type = 'error'
+        })
+        return
+    end
+
+    local netId = NetworkGetNetworkIdFromEntity(vehicle)
+    local result, err = lib.callback.await('EF-Wheelclamp:Server:RemoveClamp', false, netId, bone)
+
+    if not result then
+        lib.notify({
+            title = ("Clamp removal failed: %s"):format(tostring(err)),
+            type = 'error'
+        })
+        return
+    end
+
+    lib.notify({
+        title = 'Clamp removed!',
+        type = 'success'
+    })
+end
+
 CreateThread(function()
     exports.ox_target:addGlobalVehicle({
         {
-            name = "apply_parking_boot",
-            icon = "",  -- No icon
             label = "Apply Parking Boot",
             distance = 3.0,
-            event = "wheelclamp:client:ApplyClamp",
+            icon = 'fa-solid fa-road-lock',
+            items = { config.itemName },
+            groups = config.applyClampAllowedJobs,
+            onSelect = applyClamp,
             canInteract = function(entity)
-                local playerData = getPlayerData()
-                if not playerData or not playerData.job then return false end
-                local job = playerData.job.name:lower()
-                local grade = tonumber(playerData.job.grade) or 0
-                local required = Config.ApplyClampAllowedJobs[job]
-                if not required or grade < required then
+                if Entity(entity).state.wheelclamp then
                     return false
                 end
-                local netId = getServerNetId(entity)
-                if clientClampedVehicles[tostring(netId)] then
-                    return false
-                end
-                local inventory = exports.ox_inventory:GetPlayerItems() or {}
-                for _, item in pairs(inventory) do
-                    if item.name == ITEM_NAME then
-                        return true
-                    end
-                end
-                return false
+
+                return true
             end
         },
         {
-            name = "remove_parking_boot",
-            icon = "",  -- No icon
             label = "Remove Parking Boot",
             distance = 3.0,
-            event = "wheelclamp:client:RemoveClamp",
+            icon = 'fa-solid fa-road-lock',
+            groups = config.removeClampAllowedJobs,
+            onSelect = removeClamp,
             canInteract = function(entity)
-                local playerData = getPlayerData()
-                if not playerData or not playerData.job then return false end
-                local job = playerData.job.name:lower()
-                local grade = tonumber(playerData.job.grade) or 0
-                local required = Config.RemoveClampAllowedJobs[job]
-                if not required or grade < required then
+                if not Entity(entity).state.wheelclamp then
                     return false
                 end
-                local netId = getServerNetId(entity)
-                if not clientClampedVehicles[tostring(netId)] then
-                    return false
-                end
+
                 return true
             end
         }
     })
 end)
 
---------------------------------------------------------------------------------
--- Client Event Handlers for Clamp Apply/Remove
---------------------------------------------------------------------------------
-RegisterNetEvent("wheelclamp:client:ApplyClamp")
-AddEventHandler("wheelclamp:client:ApplyClamp", function(data)
-    local vehicle = data.entity
-    if not DoesEntityExist(vehicle) then
-        TriggerEvent("chat:addMessage", { args = { "Error", "No vehicle nearby!" } })
+AddStateBagChangeHandler("wheelclamp", "", function(bagName, _, value)
+    local vehicle = GetEntityFromStateBagName(bagName)
+
+    if Entity(vehicle).state.wheelclamp then
+        detachClamp(vehicle, Entity(vehicle).state.wheelclamp)
         return
     end
-    if not hasClampItem() then
-        TriggerEvent("chat:addMessage", { args = { "Error", Config.Language.noItem } })
-        return
-    end
-    local bone = getClosestTireBoneByPlayer(vehicle)
-    if not bone then
-        TriggerEvent("chat:addMessage", { args = { "Error", "Could not determine target tire." } })
-        return
-    end
-    walkToOffsetAndAnimate(vehicle, APPLY_DURATION, function(success)
-        if not success then
-            TriggerEvent("chat:addMessage", { args = { "Error", "Failed to complete animation." } })
-            return
+
+    if value == nil then return end
+
+    attachClamp(vehicle, value)
+end)
+
+CreateThread(function()
+    for _, vehicle in pairs(GetGamePool('CVehicle')) do
+        if Entity(vehicle).state.wheelclamp then
+            attachClamp(vehicle, Entity(vehicle).state.wheelclamp)
         end
-        local netId = getServerNetId(vehicle)
-        local result, err = lib.callback.await('wheelclamp:server:applyClamp', false, netId, bone)
-        if not result then
-            TriggerEvent("chat:addMessage", { args = { "Error", string.format("Clamp application failed: %s", tostring(err)) } })
-        else
-            TriggerEvent("chat:addMessage", { args = { "Success", "Clamp applied!" } })
+    end
+end)
+
+AddEventHandler('onResourceStop', function(resourceName)
+    if resourceName ~= cache.resource then return end
+
+    for _, clamp in pairs(wheelClamps) do
+        if DoesEntityExist(clamp) then
+            DeleteEntity(clamp)
         end
-    end, bone, "Applying Parking Boot")
-end)
-
-RegisterNetEvent("wheelclamp:client:RemoveClamp")
-AddEventHandler("wheelclamp:client:RemoveClamp", function(data)
-    local vehicle = data.entity
-    if not DoesEntityExist(vehicle) then
-        TriggerEvent("chat:addMessage", { args = { "Error", "No vehicle nearby!" } })
-        return
     end
-    local bone = getClosestClampedTire(vehicle)
-    if not bone then
-        TriggerEvent("chat:addMessage", { args = { "Error", "No clamped tire found." } })
-        return
-    end
-    walkToOffsetAndAnimate(vehicle, APPLY_DURATION, function(success)
-        if not success then
-            TriggerEvent("chat:addMessage", { args = { "Error", "Failed to complete animation." } })
-            return
-        end
-        local netId = getServerNetId(vehicle)
-        local result, err = lib.callback.await('wheelclamp:server:removeClamp', false, netId, bone)
-        if not result then
-            TriggerEvent("chat:addMessage", { args = { "Error", string.format("Clamp removal failed: %s", tostring(err)) } })
-        else
-            TriggerEvent("chat:addMessage", { args = { "Success", "Clamp removed!" } })
-        end
-    end, bone, "Removing Parking Boot")
-end)
-
---------------------------------------------------------------------------------
--- State Bag Handlers & Synchronization
---------------------------------------------------------------------------------
-RegisterNetEvent("wheelclamp:client:ForceApplyClamp")
-AddEventHandler("wheelclamp:client:ForceApplyClamp", function(vehicleNetId, clampApplied, bone)
-    if not NetworkDoesEntityExistWithNetworkId(vehicleNetId) then return end
-    local vehicle = NetworkGetEntityFromNetworkId(vehicleNetId)
-    if not DoesEntityExist(vehicle) then return end
-    if clampApplied then
-        clientClampedVehicles[tostring(vehicleNetId)] = bone
-        SetVehicleUndriveable(vehicle, true)
-        SetVehicleEngineOn(vehicle, false, true, true)
-        attachClamp(vehicle, bone)
-    else
-        clientClampedVehicles[tostring(vehicleNetId)] = nil
-        detachClamp(vehicle, bone)
-    end
-end)
-
-AddStateBagChangeHandler("efWheelClamp", nil, function(bagName, key, value, reserved, replicated)
-    local netIdStr = bagName:match("entity:(%d+)")
-    if not netIdStr then return end
-    local vehicleNetId = tonumber(netIdStr)
-    local s = tostring(value or "")
-    if s == "" then
-        TriggerServerEvent("wheelclamp:server:RestoreClamp", vehicleNetId)
-        return
-    end
-    local success, data = pcall(json.decode, s)
-    if not (success and type(data) == "table") then
-        TriggerServerEvent("wheelclamp:server:RestoreClamp", vehicleNetId)
-        return
-    end
-    TriggerEvent("wheelclamp:client:ForceApplyClamp", vehicleNetId, data.clamp, data.bone)
-end)
-
-AddEventHandler("entityStreamIn", function(entity)
-    if GetEntityType(entity) ~= 2 then return end
-    Wait(1000)
-    local netId = getServerNetId(entity)
-    local bagName = string.format("entity:%d", netId)
-    local state = GetStateBagValue(bagName, "efWheelClamp")
-    if not state or state == "" then
-        TriggerServerEvent("wheelclamp:server:RestoreClamp", netId)
-        return
-    end
-    local success, data = pcall(json.decode, tostring(state))
-    if not (success and type(data) == "table") then
-        TriggerServerEvent("wheelclamp:server:RestoreClamp", netId)
-        return
-    end
-    if data.bone then
-        TriggerEvent("wheelclamp:client:ForceApplyClamp", netId, data.clamp, data.bone)
-    end
-end)
-
-AddEventHandler("onClientEntityRemove", function(entity)
-    local netId = getServerNetId(entity)
-    clientClampedVehicles[tostring(netId)] = nil
 end)
